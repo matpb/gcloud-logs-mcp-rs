@@ -1,0 +1,15 @@
+services:
+  gcloud-logs-mcp:
+    build: .
+    container_name: gcloud-logs-mcp
+    restart: unless-stopped
+    ports:
+      - "${MCP_PORT:-8432}:8432"
+    environment:
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8432"
+      RUST_LOG: "${RUST_LOG:-gcloud_logs_mcp=info}"
+      GCP_PROJECTS: '${GCP_PROJECTS}'
+      GOOGLE_APPLICATION_CREDENTIALS: "/credentials/sa-key.json"
+    volumes:
+      - ${CREDENTIALS_DIR:-./credentials}:/credentials:ro

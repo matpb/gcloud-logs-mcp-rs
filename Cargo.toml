@@ -1,0 +1,36 @@
+[package]
+name = "gcloud-logs-mcp"
+version = "1.0.0"
+repository = "https://github.com/matpb/gcloud-logs-mcp-rs"
+readme = "README.md"
+edition = "2024"
+license = "MIT"
+authors = ["Mathieu-Philippe Bourgeois <bourgeois.mat@gmail.com>"]
+description = "A lightweight Rust MCP server for querying Google Cloud Logging with multi-project support"
+keywords = ["mcp", "gcloud", "logging", "cloud", "ai"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "gcloud-logs-mcp"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmcp = { version = "1.2", features = ["server", "transport-streamable-http-server"] }
+schemars = "1.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+http = "1"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+gcp_auth = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
