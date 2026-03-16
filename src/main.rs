@@ -6,8 +6,10 @@ mod mcp;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::extract::Request;
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::local::LocalSessionManager,
@@ -49,9 +51,24 @@ async fn main() {
         StreamableHttpServerConfig::default(),
     );
 
+    // Build MCP route with optional API key middleware
+    let mcp_router = if let Some(ref key) = cfg.api_key {
+        let api_key = Arc::new(key.clone());
+        tracing::info!("API key authentication enabled");
+        axum::Router::new()
+            .route("/mcp", axum::routing::any_service(mcp_service))
+            .layer(middleware::from_fn(move |req, next| {
+                let key = api_key.clone();
+                api_key_auth(key, req, next)
+            }))
+    } else {
+        tracing::warn!("No API_KEY set — MCP endpoint is unauthenticated");
+        axum::Router::new().route("/mcp", axum::routing::any_service(mcp_service))
+    };
+
     let app = axum::Router::new()
         .route("/health", axum::routing::get(health))
-        .route("/mcp", axum::routing::any_service(mcp_service))
+        .merge(mcp_router)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http());
 
@@ -75,4 +92,23 @@ async fn main() {
 
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, "ok")
+}
+
+async fn api_key_auth(expected: Arc<String>, req: Request, next: Next) -> Response {
+    // Check Authorization: Bearer <key> or X-API-Key: <key>
+    let provided = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .or_else(|| {
+            req.headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+        });
+
+    match provided {
+        Some(key) if key == expected.as_str() => next.run(req).await,
+        _ => (StatusCode::UNAUTHORIZED, "Unauthorized: invalid or missing API key").into_response(),
+    }
 }

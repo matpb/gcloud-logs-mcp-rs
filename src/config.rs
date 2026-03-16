@@ -30,6 +30,7 @@ pub struct Config {
     pub projects: Vec<ProjectConfig>,
     pub default_limit: u32,
     pub max_limit: u32,
+    pub api_key: Option<String>,
 }
 
 impl Config {
@@ -59,6 +60,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(1000),
+            api_key: env::var("API_KEY").ok().filter(|k| !k.is_empty()),
         }
     }
 
