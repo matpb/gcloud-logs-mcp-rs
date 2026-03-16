@@ -10,6 +10,7 @@ services:
       MCP_PORT: "8432"
       RUST_LOG: "${RUST_LOG:-gcloud_logs_mcp=info}"
       GCP_PROJECTS: '${GCP_PROJECTS}'
+      API_KEY: "${API_KEY:-}"
       GOOGLE_APPLICATION_CREDENTIALS: "/credentials/sa-key.json"
     volumes:
       - ${CREDENTIALS_DIR:-./credentials}:/credentials:ro
