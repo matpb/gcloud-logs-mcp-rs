@@ -12,9 +12,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
-    session::local::LocalSessionManager,
+    session::never::NeverSessionManager,
 };
 use tokio::net::TcpListener;
+use tokio::signal::unix::{SignalKind, signal};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
@@ -47,8 +48,10 @@ async fn main() {
     let mcp_cfg = cfg.clone();
     let mcp_service = StreamableHttpService::new(
         move || Ok(GcloudLogsMcp::new(mcp_client.clone(), mcp_cfg.clone())),
-        Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        Arc::new(NeverSessionManager::default()),
+        StreamableHttpServerConfig::default()
+            .with_stateful_mode(false)
+            .with_json_response(true),
     );
 
     // Build MCP route with optional API key middleware
@@ -76,10 +79,13 @@ async fn main() {
     let listener = TcpListener::bind(addr).await.unwrap();
     tracing::info!("GCloud Logs MCP server listening on {addr}");
 
-    // Graceful shutdown on SIGTERM/SIGINT
+    // Graceful shutdown on SIGTERM (docker stop) or SIGINT (ctrl-c)
     let shutdown = async {
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Shutting down...");
+        let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received, shutting down..."),
+            _ = sigterm.recv() => tracing::info!("SIGTERM received, shutting down..."),
+        }
     };
 
     axum::serve(listener, app)
