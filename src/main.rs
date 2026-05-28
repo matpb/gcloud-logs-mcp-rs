@@ -51,7 +51,8 @@ async fn main() {
         Arc::new(NeverSessionManager::default()),
         StreamableHttpServerConfig::default()
             .with_stateful_mode(false)
-            .with_json_response(true),
+            .with_json_response(true)
+            .disable_allowed_hosts(),
     );
 
     // Build MCP route with optional API key middleware
