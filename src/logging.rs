@@ -323,7 +323,12 @@ fn format_entry(entry: serde_json::Value) -> serde_json::Value {
         if let Some(val) = obj.get(*payload_key) {
             let serialized = serde_json::to_string(val).unwrap_or_default();
             if serialized.len() > 2000 {
-                let truncated = &serialized[..2000];
+                // Back up to a char boundary so the cut never splits a multi-byte char.
+                let mut cut = 2000;
+                while !serialized.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                let truncated = &serialized[..cut];
                 result.insert(
                     payload_key.to_string(),
                     serde_json::json!({
@@ -403,5 +408,30 @@ fn map_api_error(status: u16, body: &str, project_name: &str) -> String {
             "Cloud Logging API error (HTTP {}): {}",
             status, detail
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn truncates_multibyte_payload_without_panicking() {
+        // Serialized, the leading quote puts each "é" at an odd byte, so byte 2000 splits one.
+        let payload = "é".repeat(1500);
+        let result = format_entry(json!({"textPayload": payload}));
+        let truncated = &result["textPayload"];
+        assert_eq!(truncated["_truncated"], json!(true));
+        assert_eq!(truncated["_original_size"], json!(3002));
+        let content = truncated["content"].as_str().expect("content is a string");
+        assert!(content.len() <= 2000);
+        assert_eq!(content, format!("\"{}", "é".repeat(999)));
+    }
+
+    #[test]
+    fn short_payload_is_untouched() {
+        let result = format_entry(json!({"textPayload": "hi"}));
+        assert_eq!(result, json!({"textPayload": "hi"}));
     }
 }

@@ -35,13 +35,13 @@ impl GcloudLogsMcp {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ProjectParams {
-    /// Project name (e.g. "siku-dev", "siku-prod")
+    /// Project name (e.g. "my-dev", "my-prod")
     project: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct QueryLogsParams {
-    /// Project name (e.g. "siku-dev", "siku-prod")
+    /// Project name (e.g. "my-dev", "my-prod")
     project: String,
     /// Cloud Logging filter expression (e.g. 'resource.type="cloud_run_revision" AND textPayload:"error"')
     filter: Option<String>,
@@ -59,7 +59,7 @@ struct QueryLogsParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GetLogEntryParams {
-    /// Project name (e.g. "siku-dev", "siku-prod")
+    /// Project name (e.g. "my-dev", "my-prod")
     project: String,
     /// The insertId of the log entry to retrieve
     insert_id: String,

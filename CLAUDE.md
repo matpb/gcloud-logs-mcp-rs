@@ -17,8 +17,8 @@ Run from the repo root. `--locked` makes cargo fail instead of rewriting `Cargo.
 - Build (release): `cargo build --release --locked` (LTO and one codegen unit, so it is slow)
 - Typecheck: `cargo check --locked`
 - Lint: `cargo clippy --locked`
-- Full test suite: `cargo test --locked` (no tests exist yet, so this runs 0)
-- Single test: `cargo test --locked parse_time_range` (a name filter; example name, no test matches it yet)
+- Full test suite: `cargo test --locked` (unit tests live in `#[cfg(test)]` modules; `src/logging.rs` has the first ones)
+- Single test: `cargo test --locked truncates_multibyte_payload`
 - Run: not listed. Startup needs real credentials and calls Google Cloud. Use the README Quick Start.
 
 ## Layout
