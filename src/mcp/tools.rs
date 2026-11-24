@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
-    ReadResourceResult, ResourceContents, RawResource, ServerCapabilities, ServerInfo,
+    Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
+    ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
+    ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -230,11 +231,12 @@ impl GcloudLogsMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for GcloudLogsMcp {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let project_names = self.config.project_names();
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
+        info.server_info = Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -254,76 +256,404 @@ impl ServerHandler for GcloudLogsMcp {
         info
     }
 
-    fn list_resources(
+    async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
-        async {
-            let resources: Vec<_> = self
-                .config
-                .projects
-                .iter()
-                .map(|p| {
-                    Annotated::new(
-                        RawResource::new(
-                            format!("gcp-logs://{}", p.name),
-                            p.name.clone(),
-                        )
-                        .with_description(format!(
-                            "Google Cloud Logging for project '{}' ({})",
-                            p.name, p.project_id
-                        ))
-                        .with_mime_type("application/json"),
-                        None,
-                    )
-                })
-                .collect();
-
-            Ok(ListResourcesResult {
-                resources,
-                ..Default::default()
+    ) -> Result<ListResourcesResult, ErrorData> {
+        let resources: Vec<Resource> = self
+            .config
+            .projects
+            .iter()
+            .map(|p| {
+                Resource::new(format!("gcp-logs://{}", p.name), p.name.clone())
+                    .with_description(format!(
+                        "Google Cloud Logging for project '{}' ({})",
+                        p.name, p.project_id
+                    ))
+                    .with_mime_type("application/json")
             })
-        }
+            .collect();
+
+        Ok(ListResourcesResult {
+            resources,
+            ..Default::default()
+        })
     }
 
-    fn read_resource(
+    async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ReadResourceResult, ErrorData>> + Send + '_ {
-        async move {
-            let project_name = request
-                .uri
-                .strip_prefix("gcp-logs://")
-                .ok_or_else(|| ErrorData::invalid_params("URI must start with gcp-logs://", None))?;
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        let project_name = request
+            .uri
+            .strip_prefix("gcp-logs://")
+            .ok_or_else(|| ErrorData::invalid_params("URI must start with gcp-logs://", None))?;
 
-            let project_config = self
-                .config
-                .projects
-                .iter()
-                .find(|p| p.name == project_name)
-                .ok_or_else(|| {
-                    let available: Vec<&str> = self.config.projects.iter().map(|p| p.name.as_str()).collect();
-                    ErrorData::invalid_params(
-                        format!("Unknown project '{project_name}'. Available: {available:?}"),
-                        None,
-                    )
-                })?;
-
-            let info = serde_json::json!({
-                "name": project_config.name,
-                "project_id": project_config.project_id,
-                "usage": format!(
-                    "Use project name '{}' as the 'project' parameter in query_logs, list_logs, list_resource_types, and get_log_entry tools.",
-                    project_config.name
+        let project_config = self
+            .config
+            .projects
+            .iter()
+            .find(|p| p.name == project_name)
+            .ok_or_else(|| {
+                let available: Vec<&str> = self
+                    .config
+                    .projects
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect();
+                ErrorData::invalid_params(
+                    format!("Unknown project '{project_name}'. Available: {available:?}"),
+                    None,
                 )
-            });
+            })?;
 
-            Ok(ReadResourceResult::new(vec![ResourceContents::text(
-                serde_json::to_string_pretty(&info).unwrap_or_default(),
-                request.uri,
-            )]))
+        let info = serde_json::json!({
+            "name": project_config.name,
+            "project_id": project_config.project_id,
+            "usage": format!(
+                "Use project name '{}' as the 'project' parameter in query_logs, list_logs, list_resource_types, and get_log_entry tools.",
+                project_config.name
+            )
+        });
+
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            serde_json::to_string_pretty(&info).unwrap_or_default(),
+            request.uri,
+        )])
+        .into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthManager;
+    use crate::config::ProjectConfig;
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const INSTRUCTIONS: &str = "GCloud Logs MCP Server — read-only access to Google Cloud Logging for 2 project(s): my-dev, my-prod. Use list_projects to discover available projects. All tools require a 'project' parameter. Use query_logs for log queries (supports Cloud Logging filter syntax), list_logs to see available log names, list_resource_types to discover resource types, get_log_entry to fetch a specific entry by insertId. Resources are available at gcp-logs://<project-name> for each configured project.";
+
+    const TOOLS_LIST: &str = r#"{
+  "tools": [
+    {
+      "name": "get_log_entry",
+      "description": "Get a specific log entry by its insertId",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "insert_id": {
+            "description": "The insertId of the log entry to retrieve",
+            "type": "string"
+          },
+          "project": {
+            "description": "Project name (e.g. \"my-dev\", \"my-prod\")",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "insert_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_logs",
+      "description": "List all available log names in a GCP project",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "description": "Project name (e.g. \"my-dev\", \"my-prod\")",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_projects",
+      "description": "List all configured GCP projects and their details",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_resource_types",
+      "description": "List resource types that have recent log entries in a GCP project (e.g. gce_instance, cloud_run_revision, cloud_function)",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "project": {
+            "description": "Project name (e.g. \"my-dev\", \"my-prod\")",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "query_logs",
+      "description": "Query log entries from Google Cloud Logging. Supports Cloud Logging filter syntax, resource type filtering, severity filtering, and flexible time ranges.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "properties": {
+          "filter": {
+            "description": "Cloud Logging filter expression (e.g. 'resource.type=\"cloud_run_revision\" AND textPayload:\"error\"')",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Max entries to return (default: 100, max: 1000)",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "order_by": {
+            "description": "Order: \"timestamp asc\" or \"timestamp desc\" (default: \"timestamp desc\")",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "description": "Project name (e.g. \"my-dev\", \"my-prod\")",
+            "type": "string"
+          },
+          "resource_type": {
+            "description": "Filter by resource type (e.g. \"gce_instance\", \"cloud_run_revision\", \"cloud_function\")",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "severity": {
+            "description": "Minimum severity: DEFAULT, DEBUG, INFO, NOTICE, WARNING, ERROR, CRITICAL, ALERT, EMERGENCY",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time_range": {
+            "description": "Time range: relative (\"1h\", \"30m\", \"7d\", \"2w\") or ISO timestamp (\"2024-01-15T00:00:00Z\") or range (\"start/end\")",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      }
+    }
+  ]
+}"#;
+
+    async fn test_server() -> GcloudLogsMcp {
+        let config = Config {
+            host: "127.0.0.1".into(),
+            port: 0,
+            projects: vec![
+                ProjectConfig {
+                    name: "my-dev".into(),
+                    project_id: "dev-project-id".into(),
+                    credentials_file: None,
+                },
+                ProjectConfig {
+                    name: "my-prod".into(),
+                    project_id: "prod-project-id".into(),
+                    credentials_file: None,
+                },
+            ],
+            default_limit: 100,
+            max_limit: 1000,
+            api_key: None,
+        };
+        let client = Arc::new(LoggingClient::new(AuthManager::new(&[]).await).await);
+        GcloudLogsMcp::new(client, config)
+    }
+
+    fn handshake() -> Vec<Value> {
+        vec![
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        ]
+    }
+
+    fn request(id: u64, method: &str, params: Value) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+    }
+
+    /// Sends the messages over an in-memory JSON-RPC transport and returns the responses by id.
+    async fn exchange(messages: &[Value]) -> BTreeMap<u64, Value> {
+        let (client_io, server_io) = tokio::io::duplex(1 << 20);
+        let (server_read, server_write) = tokio::io::split(server_io);
+        let (client_read, mut client_write) = tokio::io::split(client_io);
+        let mut expected = 0;
+        for message in messages {
+            if message.get("id").is_some() {
+                expected += 1;
+            }
+            client_write
+                .write_all(format!("{message}\n").as_bytes())
+                .await
+                .unwrap();
         }
+        let running = rmcp::serve_server(test_server().await, (server_read, server_write))
+            .await
+            .unwrap();
+        let mut lines = BufReader::new(client_read).lines();
+        let mut responses = BTreeMap::new();
+        for _ in 0..expected {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("server closed the stream");
+            let response: Value = serde_json::from_str(&line).unwrap();
+            responses.insert(response["id"].as_u64().unwrap(), response);
+        }
+        drop(running);
+        responses
+    }
+
+    #[tokio::test]
+    async fn initialize_advertises_only_tools_and_resources() {
+        let responses = exchange(&handshake()).await;
+        let result = &responses[&1]["result"];
+        assert_eq!(result["protocolVersion"], "2025-06-18");
+        assert_eq!(result["serverInfo"]["name"], "gcloud-logs-mcp");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            result["capabilities"],
+            json!({"tools": {}, "resources": {}})
+        );
+        assert_eq!(result["instructions"], INSTRUCTIONS);
+    }
+
+    #[tokio::test]
+    async fn tools_list_snapshot() {
+        let mut messages = handshake();
+        messages.push(request(2, "tools/list", json!({})));
+        let responses = exchange(&messages).await;
+        let expected: Value = serde_json::from_str(TOOLS_LIST).unwrap();
+        assert_eq!(responses[&2]["result"], expected);
+    }
+
+    #[tokio::test]
+    async fn list_projects_call_snapshot() {
+        let mut messages = handshake();
+        messages.push(request(
+            3,
+            "tools/call",
+            json!({"name": "list_projects", "arguments": {}}),
+        ));
+        let responses = exchange(&messages).await;
+        assert_eq!(
+            responses[&3]["result"],
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": "{\"count\":2,\"message\":\"Available projects: my-dev, my-prod\",\"projects\":[{\"name\":\"my-dev\",\"project_id\":\"dev-project-id\"},{\"name\":\"my-prod\",\"project_id\":\"prod-project-id\"}]}"
+                }],
+                "isError": false
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn resources_list_snapshot() {
+        let mut messages = handshake();
+        messages.push(request(4, "resources/list", json!({})));
+        let responses = exchange(&messages).await;
+        assert_eq!(
+            responses[&4]["result"],
+            json!({
+                "resources": [
+                    {
+                        "uri": "gcp-logs://my-dev",
+                        "name": "my-dev",
+                        "description": "Google Cloud Logging for project 'my-dev' (dev-project-id)",
+                        "mimeType": "application/json"
+                    },
+                    {
+                        "uri": "gcp-logs://my-prod",
+                        "name": "my-prod",
+                        "description": "Google Cloud Logging for project 'my-prod' (prod-project-id)",
+                        "mimeType": "application/json"
+                    }
+                ]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn resources_read_returns_project_info() {
+        let mut messages = handshake();
+        messages.push(request(
+            5,
+            "resources/read",
+            json!({"uri": "gcp-logs://my-dev"}),
+        ));
+        let responses = exchange(&messages).await;
+        assert_eq!(
+            responses[&5]["result"],
+            json!({
+                "contents": [{
+                    "uri": "gcp-logs://my-dev",
+                    "mimeType": "text/plain",
+                    "text": "{\n  \"name\": \"my-dev\",\n  \"project_id\": \"dev-project-id\",\n  \"usage\": \"Use project name 'my-dev' as the 'project' parameter in query_logs, list_logs, list_resource_types, and get_log_entry tools.\"\n}"
+                }]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn resources_read_rejects_unknown_project_and_scheme() {
+        let mut messages = handshake();
+        messages.push(request(
+            6,
+            "resources/read",
+            json!({"uri": "gcp-logs://missing"}),
+        ));
+        messages.push(request(
+            7,
+            "resources/read",
+            json!({"uri": "https://example.invalid/x"}),
+        ));
+        let responses = exchange(&messages).await;
+        assert_eq!(
+            responses[&6]["error"],
+            json!({
+                "code": -32602,
+                "message": "Unknown project 'missing'. Available: [\"my-dev\", \"my-prod\"]"
+            })
+        );
+        assert_eq!(
+            responses[&7]["error"],
+            json!({"code": -32602, "message": "URI must start with gcp-logs://"})
+        );
     }
 }

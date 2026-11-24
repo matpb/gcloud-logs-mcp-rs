@@ -50,7 +50,7 @@ async fn main() {
         move || Ok(GcloudLogsMcp::new(mcp_client.clone(), mcp_cfg.clone())),
         Arc::new(NeverSessionManager::default()),
         StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
+            .with_legacy_session_mode(false)
             .with_json_response(true)
             .disable_allowed_hosts(),
     );

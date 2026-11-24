@@ -223,10 +223,10 @@ fn parse_time_range(input: &str) -> Result<(String, Option<String>), String> {
     }
 
     // Check for ISO timestamp
-    if input.contains('T') || input.contains('-') && input.len() > 5 {
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(input) {
-            return Ok((dt.to_rfc3339(), None));
-        }
+    if (input.contains('T') || input.contains('-') && input.len() > 5)
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(input)
+    {
+        return Ok((dt.to_rfc3339(), None));
     }
 
     // Parse relative duration: "1h", "30m", "7d", "2w"
@@ -257,10 +257,10 @@ fn parse_time_range(input: &str) -> Result<(String, Option<String>), String> {
 fn build_filter(params: &QueryParams) -> Result<String, String> {
     let mut parts: Vec<String> = Vec::new();
 
-    if let Some(ref filter) = params.filter {
-        if !filter.trim().is_empty() {
-            parts.push(filter.clone());
-        }
+    if let Some(ref filter) = params.filter
+        && !filter.trim().is_empty()
+    {
+        parts.push(filter.clone());
     }
 
     if let Some(ref resource_type) = params.resource_type {
@@ -344,13 +344,13 @@ fn format_entry(entry: serde_json::Value) -> serde_json::Value {
     }
 
     // Clean up logName: strip projects/xxx/logs/ prefix
-    if let Some(log_name) = result.get("logName").and_then(|v| v.as_str()) {
-        if let Some((_, short)) = log_name.rsplit_once('/') {
-            result.insert(
-                "logName".to_string(),
-                serde_json::Value::String(urlencoding_decode(short)),
-            );
-        }
+    if let Some(log_name) = result.get("logName").and_then(|v| v.as_str())
+        && let Some((_, short)) = log_name.rsplit_once('/')
+    {
+        result.insert(
+            "logName".to_string(),
+            serde_json::Value::String(urlencoding_decode(short)),
+        );
     }
 
     serde_json::Value::Object(result)
@@ -363,11 +363,11 @@ fn urlencoding_decode(input: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '%' {
             let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    result.push(byte as char);
-                    continue;
-                }
+            if hex.len() == 2
+                && let Ok(byte) = u8::from_str_radix(&hex, 16)
+            {
+                result.push(byte as char);
+                continue;
             }
             result.push('%');
             result.push_str(&hex);
