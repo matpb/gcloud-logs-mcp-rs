@@ -14,6 +14,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::never::NeverSessionManager,
 };
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tower_http::cors::CorsLayer;
@@ -115,7 +116,39 @@ async fn api_key_auth(expected: Arc<String>, req: Request, next: Next) -> Respon
         });
 
     match provided {
-        Some(key) if key == expected.as_str() => next.run(req).await,
+        Some(key) if key_matches(key, expected.as_str()) => next.run(req).await,
         _ => (StatusCode::UNAUTHORIZED, "Unauthorized: invalid or missing API key").into_response(),
+    }
+}
+
+/// Compares keys in constant time; keys of different lengths never match.
+fn key_matches(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_matches;
+
+    #[test]
+    fn key_matches_equal_keys() {
+        assert!(key_matches("s3cret-key", "s3cret-key"));
+    }
+
+    #[test]
+    fn key_matches_rejects_different_keys_of_same_length() {
+        assert!(!key_matches("s3cret-kex", "s3cret-key"));
+    }
+
+    #[test]
+    fn key_matches_rejects_prefixes_in_both_directions() {
+        assert!(!key_matches("s3cret", "s3cret-key"));
+        assert!(!key_matches("s3cret-key", "s3cret"));
+    }
+
+    #[test]
+    fn key_matches_rejects_empty_against_nonempty() {
+        assert!(!key_matches("", "s3cret-key"));
+        assert!(!key_matches("s3cret-key", ""));
     }
 }

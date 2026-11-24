@@ -66,6 +66,12 @@ struct GetLogEntryParams {
     insert_id: String,
 }
 
+/// Build the `insertId` filter, escaping backslashes before quotes so the value stays one string literal.
+fn insert_id_filter(insert_id: &str) -> String {
+    let escaped = insert_id.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("insertId=\"{}\"", escaped)
+}
+
 // --- Tool implementations ---
 
 #[tool_router]
@@ -169,7 +175,7 @@ impl GcloudLogsMcp {
         Parameters(p): Parameters<GetLogEntryParams>,
     ) -> Result<String, rmcp::ErrorData> {
         let params = QueryParams {
-            filter: Some(format!("insertId=\"{}\"", p.insert_id)),
+            filter: Some(insert_id_filter(&p.insert_id)),
             resource_type: None,
             severity: None,
             time_range: None,
@@ -655,5 +661,13 @@ mod tests {
             responses[&7]["error"],
             json!({"code": -32602, "message": "URI must start with gcp-logs://"})
         );
+    }
+
+    #[test]
+    fn insert_id_filter_escapes_quotes_and_backslashes() {
+        assert_eq!(insert_id_filter(r#"ab"c\d"#), r#"insertId="ab\"c\\d""#);
+        assert_eq!(insert_id_filter(r#"\""#), r#"insertId="\\\"""#);
+        assert_eq!(insert_id_filter("plain-id_1"), r#"insertId="plain-id_1""#);
+        assert_eq!(insert_id_filter(""), r#"insertId="""#);
     }
 }

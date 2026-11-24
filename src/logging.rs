@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use chrono::{Duration, Utc};
+use chrono::{TimeDelta, Utc};
 use serde::Deserialize;
 
 use crate::auth::AuthManager;
@@ -230,17 +230,19 @@ fn parse_time_range(input: &str) -> Result<(String, Option<String>), String> {
     }
 
     // Parse relative duration: "1h", "30m", "7d", "2w"
-    let (num_str, unit) = input.split_at(input.len().saturating_sub(1));
+    // Split before the last char, which may be multi-byte.
+    let unit_start = input.char_indices().last().map_or(0, |(i, _)| i);
+    let (num_str, unit) = input.split_at(unit_start);
     let num: i64 = num_str
         .parse()
         .map_err(|_| format!("Invalid time range '{}'. Use formats like '1h', '30m', '7d', or ISO timestamps.", input))?;
 
-    let duration = match unit {
-        "s" => Duration::seconds(num),
-        "m" => Duration::minutes(num),
-        "h" => Duration::hours(num),
-        "d" => Duration::days(num),
-        "w" => Duration::weeks(num),
+    let amount = match unit {
+        "s" => TimeDelta::try_seconds(num),
+        "m" => TimeDelta::try_minutes(num),
+        "h" => TimeDelta::try_hours(num),
+        "d" => TimeDelta::try_days(num),
+        "w" => TimeDelta::try_weeks(num),
         _ => {
             return Err(format!(
                 "Unknown time unit '{}'. Use s, m, h, d, or w.",
@@ -249,7 +251,14 @@ fn parse_time_range(input: &str) -> Result<(String, Option<String>), String> {
         }
     };
 
-    let start = Utc::now() - duration;
+    if num <= 0 {
+        return Err(format!("Time range '{}' must be a positive count.", input));
+    }
+
+    // Both the duration and the subtraction from now can be out of range.
+    let start = amount
+        .and_then(|amount| Utc::now().checked_sub_signed(amount))
+        .ok_or_else(|| format!("Time range '{}' is too large.", input))?;
     Ok((start.to_rfc3339(), None))
 }
 
@@ -260,7 +269,7 @@ fn build_filter(params: &QueryParams) -> Result<String, String> {
     if let Some(ref filter) = params.filter
         && !filter.trim().is_empty()
     {
-        parts.push(filter.clone());
+        parts.push(format!("({})", filter));
     }
 
     if let Some(ref resource_type) = params.resource_type {
@@ -433,5 +442,117 @@ mod tests {
     fn short_payload_is_untouched() {
         let result = format_entry(json!({"textPayload": "hi"}));
         assert_eq!(result, json!({"textPayload": "hi"}));
+    }
+
+    /// Asserts that `input` means "now minus `expected`", allowing up to 5 seconds of drift.
+    fn assert_starts_ago(input: &str, expected: TimeDelta) {
+        let (start, end) = parse_time_range(input).expect("valid time range");
+        assert_eq!(end, None);
+        let start = chrono::DateTime::parse_from_rfc3339(&start).expect("RFC3339 start");
+        let ago = Utc::now() - start.with_timezone(&Utc);
+        assert!(
+            ago >= expected && ago < expected + TimeDelta::seconds(5),
+            "{input}: started {ago:?} ago, expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn parse_time_range_accepts_relative_units() {
+        assert_starts_ago("1h", TimeDelta::hours(1));
+        assert_starts_ago("30m", TimeDelta::minutes(30));
+        assert_starts_ago("7d", TimeDelta::days(7));
+        assert_starts_ago("2w", TimeDelta::weeks(2));
+        assert_starts_ago("90s", TimeDelta::seconds(90));
+    }
+
+    #[test]
+    fn parse_time_range_accepts_rfc3339_and_pairs() {
+        assert_eq!(
+            parse_time_range("2024-01-15T00:00:00Z").unwrap(),
+            ("2024-01-15T00:00:00+00:00".to_string(), None)
+        );
+        assert_eq!(
+            parse_time_range("2024-01-15T00:00:00Z/2024-01-16T00:00:00Z").unwrap(),
+            (
+                "2024-01-15T00:00:00+00:00".to_string(),
+                Some("2024-01-16T00:00:00+00:00".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn parse_time_range_rejects_multibyte_input_without_panicking() {
+        assert_eq!(
+            parse_time_range("é").unwrap_err(),
+            "Invalid time range 'é'. Use formats like '1h', '30m', '7d', or ISO timestamps."
+        );
+        assert_eq!(
+            parse_time_range("1é").unwrap_err(),
+            "Unknown time unit 'é'. Use s, m, h, d, or w."
+        );
+        assert_eq!(
+            parse_time_range("").unwrap_err(),
+            "Invalid time range ''. Use formats like '1h', '30m', '7d', or ISO timestamps."
+        );
+    }
+
+    #[test]
+    fn parse_time_range_rejects_out_of_range_counts_without_panicking() {
+        assert_eq!(
+            parse_time_range("99999999999999w").unwrap_err(),
+            "Time range '99999999999999w' is too large."
+        );
+        assert_eq!(
+            parse_time_range("99999999999999s").unwrap_err(),
+            "Time range '99999999999999s' is too large."
+        );
+        assert_eq!(
+            parse_time_range("9999999999999999999h").unwrap_err(),
+            "Invalid time range '9999999999999999999h'. Use formats like '1h', '30m', '7d', or ISO timestamps."
+        );
+    }
+
+    #[test]
+    fn parse_time_range_rejects_zero_and_negative_counts() {
+        assert_eq!(
+            parse_time_range("-5h").unwrap_err(),
+            "Time range '-5h' must be a positive count."
+        );
+        assert_eq!(
+            parse_time_range("0m").unwrap_err(),
+            "Time range '0m' must be a positive count."
+        );
+    }
+
+    #[test]
+    fn build_filter_wraps_user_filter_in_parentheses() {
+        let params = QueryParams {
+            filter: Some("a OR b".to_string()),
+            resource_type: None,
+            severity: Some("error".to_string()),
+            time_range: None,
+            limit: 10,
+            order_by: None,
+        };
+        assert_eq!(
+            build_filter(&params).unwrap(),
+            "(a OR b) AND severity>=ERROR"
+        );
+    }
+
+    #[test]
+    fn build_filter_skips_blank_user_filter() {
+        let params = QueryParams {
+            filter: Some("   ".to_string()),
+            resource_type: Some("gce_instance".to_string()),
+            severity: None,
+            time_range: None,
+            limit: 10,
+            order_by: None,
+        };
+        assert_eq!(
+            build_filter(&params).unwrap(),
+            "resource.type=\"gce_instance\""
+        );
     }
 }
